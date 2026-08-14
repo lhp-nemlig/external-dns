@@ -311,6 +311,8 @@ func (r *rfc2136Provider) List() ([]dns.RR, error) {
 				continue
 			}
 
+			var attempt []dns.RR
+			var attemptErr error
 			for e := range env {
 				if e.Error != nil {
 					if errors.Is(e.Error, dns.ErrSoa) {
@@ -318,10 +320,26 @@ func (r *rfc2136Provider) List() ([]dns.RR, error) {
 					} else {
 						log.Errorf("AXFR error: %v", e.Error)
 					}
-					continue
+					attemptErr = e.Error
+					// The producer sends a single error envelope and then closes the
+					// channel, so breaking here does not leak it.
+					break
 				}
-				records = append(records, e.RR...)
+				// Only reached when e.Error is nil: error envelopes can still
+				// carry RRs, which must not be accumulated.
+				attempt = append(attempt, e.RR...)
 			}
+			if attemptErr != nil {
+				lastErr = fmt.Errorf("failed to read AXFR response: %w", attemptErr)
+				r.lastErr = lastErr
+				continue
+			}
+			// A later attempt succeeded: clear any error from an earlier attempt so
+			// the post-loop guard does not report a failure that was already retried
+			// away. r.lastErr is intentionally left alone — getNextNameserver() reads
+			// and resets it under r.mu to drive the "disabled" strategy's counter.
+			lastErr = nil
+			records = append(records, attempt...)
 			// If records were fetched successfully, break out of the loop
 			if len(records) > 0 {
 				break
